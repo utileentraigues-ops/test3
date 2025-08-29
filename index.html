@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Commande Fruits & Légumes — UTILE ENTRAIGUES</title>
+<style>
+  body{font-family:Arial,sans-serif;background:#f6f7f9;margin:0;padding:20px}
+  .container{max-width:1100px;margin:auto}
+  .nav{display:flex;gap:10px;margin-bottom:20px}
+  .tab{padding:10px 15px;border:1px solid #ddd;background:#fff;cursor:pointer;border-radius:8px}
+  .tab.active{background:#16a34a;color:#fff}           /* vert */
+  .card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .msg{padding:10px;border-radius:8px;border:1px solid #bbe7c2;background:#ecfdf5;color:#065f46}
+  .btn{background:#16a34a;border:none;color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer}
+  .btn.secondary{background:#0ea5e9}
+  .btn.ghost{background:#fff;color:#16a34a;border:1px solid #16a34a}
+  input[type="number"]{width:90px}
+  select{min-width:90px}
+  .footer{text-align:center;font-size:12px;color:#555;margin-top:20px}
+  .pill{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid #ddd;margin-right:6px;margin-bottom:6px;cursor:pointer;background:#fff}
+  .pill.active{background:#16a34a;color:#fff;border-color:#16a34a}
+  .cart-line{display:flex;gap:8px;align-items:center;justify-content:space-between;border-bottom:1px solid #eee;padding:8px 0}
+  .left{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.19.3/dist/xlsx.full.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase-js.min.js"></script>
+</head>
+<body>
+<div class="container">
+
+  <div class="nav">
+    <button class="tab active" id="tabCatalog">Catalogue</button>
+    <button class="tab" id="tabCart">Panier</button>
+    <div style="margin-left:auto" id="authZone">
+      <button class="btn" id="btnLogin">Se connecter</button>
+      <button class="btn ghost" id="btnLogout" style="display:none">Se déconnecter</button>
+    </div>
+  </div>
+
+  <!-- Barre actions catalogue -->
+  <section id="pageCatalog">
+    <div class="card" style="margin-bottom:10px">
+      <div class="row">
+        <input type="file" id="file" accept=".csv,.xlsx,.xls"/>
+        <button class="btn" id="btnImport">Importer</button>
+        <span id="status" class="msg" style="display:none"></span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <strong>Filtrer par famille :</strong>
+        <div id="familyBar"></div>
+        <button class="btn ghost" id="btnClear">Effacer filtre</button>
+      </div>
+    </div>
+    <div id="grid" class="grid"></div>
+  </section>
+
+  <!-- Panier -->
+  <section id="pageCart" style="display:none">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <button class="btn secondary" id="exportCsv">Exporter CSV</button>
+          <button class="btn secondary" id="exportPdf">Exporter PDF</button>
+          <a id="mailto" class="btn" href="#">Envoyer par email</a>
+        </div>
+        <div id="cartInfo"></div>
+      </div>
+    </div>
+    <div id="cart"></div>
+  </section>
+
+  <div class="footer">UTILE ENTRAIGUES — Application de commande Fruits & Légumes</div>
+</div>
+
+<script>
+/*** 0) SUPABASE CONFIG ***/
+const SUPABASE_URL  = window.env_supabase_url  || (typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_SUPABASE_URL  : undefined);
+const SUPABASE_KEY  = window.env_supabase_key  || (typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY : undefined);
+const supabase = window.supabase.createClient(
+  SUPABASE_URL || (new URL(window.location.href)).searchParams.get('supabaseUrl'),
+  SUPABASE_KEY || (new URL(window.location.href)).searchParams.get('supabaseKey')
+);
+
+const state = {
+  user: null,
+  allProducts: [],     // {id, designation, famille}
+  familyFilter: null,
+  cartId: null,
+  cartItems: []        // {id, designation, quantite, unite}
+};
+
+/*** 1) UI NAV ***/
+const pageCatalog = document.getElementById('pageCatalog');
+const pageCart    = document.getElementById('pageCart');
+const tabCatalog  = document.getElementById('tabCatalog');
+const tabCart     = document.getElementById('tabCart');
+tabCatalog.onclick = ()=>showPage('catalog');
+tabCart.onclick    = ()=>showPage('cart');
+
+function showPage(p){
+  pageCatalog.style.display = p==='catalog' ? '' : 'none';
+  pageCart.style.display    = p==='cart' ? '' : 'none';
+  tabCatalog.classList.toggle('active', p==='catalog');
+  tabCart.classList.toggle('active', p==='cart');
+  if(p==='cart') drawCart();
+}
+
+/*** 2) AUTH ***/
+const btnLogin  = document.getElementById('btnLogin');
+const btnLogout = document.getElementById('btnLogout');
+
+btnLogin.onclick = async ()=>{
+  const email = prompt("Entre ton email pour recevoir un lien magique :");
+  if(!email) return;
+  const { error } = await supabase.auth.signInWithOtp({ email });
+  alert(error ? ("Erreur: "+error.message) : "Lien envoyé ! Vérifie ta boîte mail.");
+};
+
+btnLogout.onclick = async ()=>{
+  await supabase.auth.signOut();
+  location.reload();
+};
+
+// session au chargement
+supabase.auth.getSession().then(async ({ data })=>{
+  state.user = data.session?.user ?? null;
+  handleAuthState();
+  await bootstrap();
+});
+// écoute des changements
+supabase.auth.onAuthStateChange(async (_evt, session)=>{
+  state.user = session?.user ?? null;
+  handleAuthState();
+  await bootstrap();
+});
+
+function handleAuthState(){
+  const logged = !!state.user;
+  btnLogin.style.display  = logged ? 'none' : '';
+  btnLogout.style.display = logged ? '' : 'none';
+}
+
+/*** 3) CHARGEMENT CATALOGUE + PANIER ***/
+async function bootstrap(){
+  await loadCatalog();
+  if(state.user){
+    await ensureCart();
+    await loadCartItems();
+  }else{
+    state.cartId = null;
+    state.cartItems = [];
+  }
+  drawFamilies();
+  drawCatalog();
+  drawCart();
+}
+
+async function loadCatalog(){
+  // lecture depuis table catalog (publique en lecture)
+  const { data, error } = await supabase.from('catalog').select('id, designation, famille').order('famille', {ascending:true}).order('designation',{ascending:true});
+  if(error){ console.error(error); toast("Catalogue indisponible."); return; }
+  state.allProducts = data || [];
+}
+
+async function ensureCart(){
+  // tente de récupérer le panier utilisateur ; sinon le crée
+  let { data: carts, error } = await supabase.from('carts').select('id').eq('user_id', state.user.id).maybeSingle();
+  if(error && error.code!=='PGRST116'){ console.error(error); toast("Panier indisponible."); return; }
+  if(!carts){
+    const { data: created, error: e2 } = await supabase.from('carts').insert({ user_id: state.user.id }).select('id').single();
+    if(e2){ console.error(e2); return; }
+    state.cartId = created.id;
+  }else{
+    state.cartId = carts.id;
+  }
+}
+
+async function loadCartItems(){
+  if(!state.cartId) return;
+  const { data, error } = await supabase.from('cart_items').select('id, designation, quantite, unite').eq('cart_id', state.cartId).order('id',{ascending:true});
+  if(error){ console.error(error); return; }
+  state.cartItems = data || [];
+}
+
+/*** 4) IMPORT CATALOGUE (CSV / XLSX) → écrase contenu table catalog ***/
+const fileInput = document.getElementById('file');
+document.getElementById('btnImport').onclick = async ()=>{
+  if(!state.user){ return toast("Connecte-toi pour importer le catalogue."); }
+  const f = fileInput.files?.[0];
+  if(!f) return toast("Choisis un fichier CSV ou Excel.");
+  let rows = [];
+  if(/\.(csv)$/i.test(f.name)){
+    const text = await f.text();
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const sep = lines[0].includes(';') ? ';' : ',';
+    const head = lines[0].split(sep).map(x=>x.trim().toLowerCase());
+    const iDes = head.findIndex(h=>h.includes('désignation')||h.includes('designation'));
+    const iFam = head.findIndex(h=>h.includes('famille')||h.includes('groupe'));
+    if(iDes<0 || iFam<0) return toast("Colonnes attendues : désignation et famille/groupe.");
+    for(let i=1;i<lines.length;i++){
+      const c = lines[i].split(sep);
+      const designation = (c[iDes]||'').trim();
+      const famille = (c[iFam]||'').trim();
+      if(designation && famille) rows.push({designation, famille});
+    }
+  } else {
+    const ab = await f.arrayBuffer();
+    const wb = XLSX.read(new Uint8Array(ab), {type:"array"});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const A = XLSX.utils.sheet_to_json(ws, {header:1});
+    if(!A.length) return toast("Feuille vide.");
+    const head = (A[0]||[]).map(x=>String(x||'').toLowerCase());
+    const iDes = head.findIndex(h=>h.includes('désignation')||h.includes('designation')||h==='b'); // tolère colonne B nommée
+    const iFam = head.findIndex(h=>h.includes('famille')||h.includes('groupe')||h==='p');          // tolère colonne P nommée
+    if(iDes<0 || iFam<0) return toast("Colonnes attendues : désignation (B) et groupe/famille (P).");
+    for(let r=1;r<A.length;r++){
+      const row=A[r]||[];
+      const designation = String(row[iDes]||'').trim();
+      const famille = String(row[iFam]||'').trim();
+      if(designation && famille) rows.push({designation, famille});
+    }
+  }
+
+  // Écrase le catalogue (transaction simple : delete puis insert)
+  await supabase.from('catalog').delete().neq('id', -1);
+  if(rows.length){
+    // insert par lots
+    const chunk=1000;
+    for(let i=0;i<rows.length;i+=chunk){
+      const slice = rows.slice(i,i+chunk);
+      const { error } = await supabase.from('catalog').insert(slice);
+      if(error){ console.error(error); return toast("Erreur d’import."); }
+    }
+  }
+  toast("Catalogue mis à jour.");
+  await loadCatalog();
+  drawFamilies();
+  drawCatalog();
+};
+
+/*** 5) FILTRE FAMILLE ***/
+const familyBar = document.getElementById('familyBar');
+document.getElementById('btnClear').onclick = ()=>{ state.familyFilter=null; drawFamilies(); drawCatalog(); };
+
+function drawFamilies(){
+  const fams = [...new Set(state.allProducts.map(p=>p.famille).filter(Boolean))].sort();
+  familyBar.innerHTML = fams.map(f=>`<span class="pill ${state.familyFilter===f?'active':''}" onclick="setFam('${escapeHtml(f)}')">${escapeHtml(f)}</span>`).join('');
+}
+function setFam(f){ state.familyFilter = f; drawFamilies(); drawCatalog(); }
+
+/*** 6) CATALOG GRID ***/
+function drawCatalog(){
+  const g=document.getElementById('grid');
+  let list = state.allProducts;
+  if(state.familyFilter) list = list.filter(p=>p.famille===state.familyFilter);
+  if(!list.length){
+    g.innerHTML = '<div class="msg">Aucun produit. Importe un CSV/Excel ou change le filtre.</div>';
+    return;
+  }
+  g.innerHTML = list.map(r=>`
+    <div class="card">
+      <b>${escapeHtml(r.famille)}</b><br>${escapeHtml(r.designation)}<br>
+      <div class="row" style="margin-top:6px">
+        <input type="number" id="q_${r.id}" placeholder="Qté">
+        <select id="u_${r.id}">
+          <option>colis</option><option>kilo</option><option>pièce</option>
+        </select>
+        <button class="btn" onclick='add("${r.id}")'>Ajouter</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+/*** 7) PANIER (unique, côté Supabase) ***/
+async function add(id){
+  if(!state.user){ return toast("Connecte-toi pour utiliser le panier."); }
+  const prod = state.allProducts.find(p=>String(p.id)===String(id));
+  const q = Number(document.getElementById("q_"+id).value||0);
+  const u = document.getElementById("u_"+id).value||'colis';
+  if(!prod || q<=0) return;
+
+  const payload = { cart_id: state.cartId, designation: prod.designation, quantite: q, unite: u };
+  const { error } = await supabase.from('cart_items').insert(payload);
+  if(error){ console.error(error); return toast("Impossible d’ajouter."); }
+  await loadCartItems();
+  toast("Ajouté au panier.");
+}
+
+const cartDiv = document.getElementById('cart');
+function drawCart(){
+  const info = document.getElementById('cartInfo');
+  info.textContent = state.cartItems.length ? `${state.cartItems.length} lignes` : 'Panier vide';
+  if(!state.cartItems.length){
+    cartDiv.innerHTML = '<div class="msg">Panier vide</div>';
+    return;
+  }
+  cartDiv.innerHTML = state.cartItems.map(it=>`
+    <div class="cart-line">
+      <div class="left">
+        <strong>${escapeHtml(it.designation)}</strong>
+        <span>— ${Number(it.quantite)} ${escapeHtml(it.unite)}</span>
+      </div>
+      <button class="btn ghost" onclick="removeItem(${it.id})">Supprimer</button>
+    </div>
+  `).join('');
+}
+
+async function removeItem(id){
+  const { error } = await supabase.from('cart_items').delete().eq('id', id);
+  if(error){ console.error(error); return; }
+  await loadCartItems();
+  drawCart();
+}
+
+/*** 8) EXPORTS & EMAIL ***/
+document.getElementById('exportCsv').onclick = ()=>{
+  if(!state.cartItems.length) return;
+  const head = ['designation','quantite','unite'];
+  const lines = [head.join(';')].concat(
+    state.cartItems.map(x=>[x.designation, x.quantite, x.unite].map(csvCell).join(';'))
+  );
+  const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
+  downloadBlob(blob, 'commande.csv');
+};
+
+document.getElementById('exportPdf').onclick = ()=>{
+  if(!state.cartItems.length) return;
+  const w = window.open('', '_blank');
+  const rows = state.cartItems.map(x=>`<tr><td>${escapeHtml(x.designation)}</td><td>${x.quantite}</td><td>${escapeHtml(x.unite)}</td></tr>`).join('');
+  w.document.write(`
+    <html><head><title>Commande</title>
+    <style>table{width:100%;border-collapse:collapse}td,th{border:1px solid #333;padding:6px}</style>
+    </head><body>
+    <h2>Commande Fruits & Légumes</h2>
+    <table><thead><tr><th>Désignation</th><th>Quantité</th><th>Unité</th></tr></thead><tbody>${rows}</tbody></table>
+    <script>window.print();<\/script>
+    </body></html>
+  `);
+  w.document.close();
+};
+
+document.getElementById('mailto').onclick = (e)=>{
+  if(!state.cartItems.length){ e.preventDefault(); return; }
+  const body = state.cartItems.map(x=>`- ${x.designation} : ${x.quantite} ${x.unite}`).join('%0A');
+  const to   = prompt("Adresse email du fournisseur :", "fournisseur@example.com") || "";
+  e.currentTarget.href = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent('Commande Fruits & Légumes')}&body=${body}`;
+};
+
+/*** 9) OUTILS ***/
+function toast(txt){
+  const s=document.getElementById("status");
+  s.textContent = txt;
+  s.style.display = 'inline-block';
+  setTimeout(()=>s.style.display='none', 4000);
+}
+function csvCell(v){
+  const s = String(v??'');
+  return /[;"\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+}
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+
+/*** 10) INIT ***/
+document.addEventListener('DOMContentLoaded', ()=>showPage('catalog'));
+</script>
+</body>
+</html>
