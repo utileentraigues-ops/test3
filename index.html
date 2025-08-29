@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Commande Fruits & Légumes — UTILE ENTRAIGUES</title>
+
+<!-- XLSX pour lire Excel/CSV -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.19.3/dist/xlsx.full.min.js"></script>
+<!-- jsPDF pour exporter en PDF -->
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+
+<style>
+  :root{
+    --green:#17a34a;      /* vert boutons */
+    --green-700:#15803d;  /* vert hover */
+  }
+  *{box-sizing:border-box}
+  body{font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;margin:0;padding:20px;color:#111}
+  .container{max-width:1100px;margin:auto}
+  .nav{display:flex;gap:10px;margin-bottom:20px}
+  .tab{padding:10px 15px;border:1px solid #ddd;background:#fff;cursor:pointer;border-radius:10px}
+  .tab.active{background:#111;color:#fff}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+  .card{background:#fff;border:1px solid #ddd;border-radius:10px;padding:12px}
+  .msg{padding:10px;border-radius:10px;border:1px solid #ffe08a;background:#fff8db;color:#8a5b00}
+  .footer{text-align:center;font-size:12px;color:#666;margin-top:20px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .grow{flex:1 1 auto}
+  .btn{background:var(--green);color:#fff;border:0;border-radius:10px;padding:9px 14px;cursor:pointer}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn:hover{background:var(--green-700)}
+  input[type="file"],select,input[type="number"],input[type="text"]{
+    padding:8px;border:1px solid #ddd;border-radius:10px;background:#fff
+  }
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 14px}
+  .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;background:#fff}
+  .kicker{font-size:12px;color:#666}
+  .hr{height:1px;background:#eee;margin:10px 0}
+  .list{display:flex;flex-direction:column;gap:8px}
+  .line{display:flex;gap:8px;align-items:center;justify-content:space-between;border:1px solid #eee;background:#fff;border-radius:10px;padding:10px}
+  .line .title{font-weight:600}
+  .line small{color:#555}
+  .danger{background:#ef4444}.danger:hover{background:#dc2626}
+  .success{background:var(--green)} .success:hover{background:var(--green-700)}
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- NAV -->
+  <div class="nav">
+    <button class="tab active" id="tabCatalog" onclick="go('catalog')">Catalogue</button>
+    <button class="tab" id="tabCart" onclick="go('cart')">Panier</button>
+  </div>
+
+  <!-- CATALOGUE -->
+  <section id="pageCatalog">
+    <div class="card">
+      <div class="row" style="gap:12px">
+        <input class="grow" type="file" id="file" accept=".xlsx,.xls,.csv"/>
+        <button class="btn" onclick="clearStored()">Réinitialiser catalogue</button>
+        <span id="status" class="msg" style="display:none"></span>
+      </div>
+      <div class="toolbar">
+        <span class="kicker">Filtrer par Famille/Groupe :</span>
+        <select id="familyFilter" onchange="applyFilter()">
+          <option value="">Toutes les familles</option>
+        </select>
+        <input id="search" class="grow" type="text" placeholder="Rechercher un produit…" oninput="applyFilter()"/>
+      </div>
+      <div class="hr"></div>
+      <div id="grid" class="grid"></div>
+    </div>
+  </section>
+
+  <!-- PANIER -->
+  <section id="pageCart" style="display:none">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:end;gap:12px">
+        <div>
+          <h2 style="margin:0">Panier</h2>
+          <div class="kicker" id="cartCount">0 article</div>
+        </div>
+        <div class="row" style="gap:8px">
+          <input id="supplierEmail" type="text" placeholder="Email du fournisseur" style="min-width:240px">
+          <button class="btn success" onclick="exportCSV()" title="Exporter CSV">Exporter CSV</button>
+          <button class="btn success" onclick="exportPDF()" title="Exporter PDF">Exporter PDF</button>
+          <button class="btn success" onclick="sendEmail()" title="Ouvrir votre client mail">Envoyer par email</button>
+          <button class="btn danger" onclick="clearCart()" title="Vider le panier">Vider</button>
+        </div>
+      </div>
+      <div class="hr"></div>
+      <div id="cart" class="list"></div>
+    </div>
+  </section>
+
+  <div class="footer">UTILE ENTRAIGUES — Application de commande Fruits & Légumes</div>
+</div>
+
+<script>
+/* ---------------------- ÉTAT ---------------------- */
+let allRows = [];     // catalogue complet (toutes lignes importées)
+let rowsView = [];    // vue filtrée
+let cart = [];        // panier
+const LS_CATALOG = "ue_catalog_rows_v3";
+const LS_CART    = "ue_cart_v1";
+const LS_EMAIL   = "ue_supplier_email";
+const LS_FILE    = "ue_last_filename";
+
+/* ---------------------- NAV ---------------------- */
+function go(page){
+  document.getElementById("pageCatalog").style.display = page==="catalog" ? "" : "none";
+  document.getElementById("pageCart").style.display    = page==="cart"    ? "" : "none";
+  document.getElementById("tabCatalog").classList.toggle("active", page==="catalog");
+  document.getElementById("tabCart").classList.toggle("active", page==="cart");
+  if(page==="cart") drawCart();
+}
+
+/* ---------------------- UI helpers ---------------------- */
+function showMsg(txt){ const s=document.getElementById("status"); s.textContent=txt; s.style.display='inline-block'; }
+function hideMsg(){ const s=document.getElementById("status"); s.style.display='none'; }
+function norm(v){ return String(v ?? "").trim(); }
+function lc(v){ return norm(v).toLowerCase(); }
+
+/* ---------------------- PERSISTENCE ---------------------- */
+function saveCatalog(){
+  localStorage.setItem(LS_CATALOG, JSON.stringify(allRows));
+}
+function loadCatalog(){
+  try{
+    const raw = localStorage.getItem(LS_CATALOG);
+    if(!raw) return false;
+    allRows = JSON.parse(raw) || [];
+    return allRows.length>0;
+  }catch(e){ return false; }
+}
+function clearStored(){
+  localStorage.removeItem(LS_CATALOG);
+  localStorage.removeItem(LS_FILE);
+  allRows = []; rowsView = [];
+  drawGrid();
+  updateFamilies();
+  showMsg("Catalogue réinitialisé. Réimporte un fichier.");
+  setTimeout(hideMsg, 2500);
+}
+function saveCart(){ localStorage.setItem(LS_CART, JSON.stringify(cart)); }
+function loadCart(){ try{ const raw=localStorage.getItem(LS_CART); cart = raw? JSON.parse(raw):[]; }catch(e){ cart=[]; } }
+function saveEmail(){ localStorage.setItem(LS_EMAIL, document.getElementById("supplierEmail").value.trim()); }
+function loadEmail(){ const v = localStorage.getItem(LS_EMAIL)||""; document.getElementById("supplierEmail").value = v; }
+
+/* ---------------------- IMPORT ---------------------- */
+document.getElementById("file").addEventListener("change", onFile);
+
+function onFile(e){
+  hideMsg();
+  const f = e.target.files && e.target.files[0];
+  if(!f) return;
+  localStorage.setItem(LS_FILE, f.name);
+  const ext = (f.name.split(".").pop()||"").toLowerCase();
+  const reader = new FileReader();
+  reader.onerror = () => showMsg("Lecture du fichier impossible. Essaie un autre navigateur ou réenregistre le fichier.");
+  if(ext==="csv"){
+    reader.onload = ev => { handleCSV(ev.target.result); afterImport(); };
+    reader.readAsText(f, "utf-8");
+  } else {
+    reader.onload = ev => { handleXLSX(ev.target.result); afterImport(); };
+    reader.readAsArrayBuffer(f);
+  }
+}
+
+function afterImport(){
+  if(!allRows.length){
+    showMsg("Aucun produit détecté. Assure-toi d’avoir au minimum les colonnes ‘Désignation’ et ‘Groupe’ (ou ‘Famille’).");
+  } else {
+    hideMsg();
+    saveCatalog();
+  }
+  updateFamilies();
+  applyFilter();
+}
+
+function handleCSV(text){
+  // auto-détection du séparateur ; ou ,
+  const lines = text.split(/\r?\n/).filter(l=>l.trim()!=="");
+  const sep = (lines[0] && lines[0].split(";").length>2) ? ";" : ",";
+  const matrix = lines.map(l => l.split(sep));
+  parseMatrix(matrix);
+}
+
+function handleXLSX(arrayBuffer){
+  const wb = XLSX.read(new Uint8Array(arrayBuffer), {type:"array"});
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const matrix = XLSX.utils.sheet_to_json(ws, {header:1, raw:true});
+  parseMatrix(matrix);
+}
+
+function findHeaderRow(matrix){
+  // scanne quelques premières lignes à la recherche d’une tête
+  const KEYS = ["désignation","designation","produit","libellé","libelle","groupe","famille"];
+  const max = Math.min(10, matrix.length);
+  for(let r=0;r<max;r++){
+    const row = (matrix[r]||[]).map(lc);
+    const hits = KEYS.reduce((n,k)=> n + (row.some(c=>c.includes(k))?1:0), 0);
+    if(hits>=2) return r;
+  }
+  return 0;
+}
+
+function parseMatrix(matrix){
+  allRows = [];
+  if(!matrix || !matrix.length) return;
+
+  const hdrRow = findHeaderRow(matrix);
+  const headers = (matrix[hdrRow]||[]).map(h=>norm(h));
+  // map colonnes
+  const idx = {
+    designation: headers.findIndex(h => /désignation|designation|libell/i.test(h)),
+    groupe: headers.findIndex(h => /groupe|famille/i.test(h))
+  };
+
+  // si pas trouvé, on tente colonnes B (1) et P (15) comme tu l’as demandé précédemment
+  const fallbackDesignation = idx.designation<0 ? 1 : idx.designation;
+  const fallbackGroupe      = idx.groupe<0      ? 15: idx.groupe;
+
+  const start = hdrRow+1;
+  for(let r=start;r<matrix.length;r++){
+    const row = matrix[r]||[];
+    const des = norm(row[fallbackDesignation] ?? "");
+    const grp = norm(row[fallbackGroupe] ?? "");
+    if(!des) continue; // ignore lignes vides
+    allRows.push({
+      id:String(r),
+      designation: des,
+      groupe: grp
+    });
+  }
+}
+
+/* ---------------------- CATALOGUE RENDER ---------------------- */
+function updateFamilies(){
+  const select = document.getElementById("familyFilter");
+  const set = new Set(allRows.map(x => x.groupe).filter(Boolean));
+  const families = Array.from(set).sort((a,b)=>a.localeCompare(b,'fr',{sensitivity:"base"}));
+  // reconstruit options
+  select.innerHTML = `<option value="">Toutes les familles</option>` +
+    families.map(f=>`<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+}
+function applyFilter(){
+  const f = lc(document.getElementById("familyFilter").value);
+  const q = lc(document.getElementById("search").value);
+  rowsView = allRows.filter(x=>{
+    const okFam = !f || lc(x.groupe)===f;
+    const okQ = !q || lc(x.designation).includes(q);
+    return okFam && okQ;
+  });
+  drawGrid();
+}
+function drawGrid(){
+  const g = document.getElementById("grid");
+  if(!allRows.length){
+    g.innerHTML = `<div class="msg">Importe un fichier CSV/XLSX contenant au minimum <b>Désignation</b> et <b>Groupe/Famille</b>. Le catalogue est mémorisé jusqu’au prochain import.</div>`;
+    return;
+  }
+  if(!rowsView.length){
+    g.innerHTML = `<div class="msg">Aucun résultat avec les filtres actuels.</div>`;
+    return;
+  }
+  g.innerHTML = rowsView.map(r=>`
+    <div class="card">
+      <div style="font-size:12px;color:#666;margin-bottom:4px">${escapeHtml(r.groupe||"")}</div>
+      <div style="font-weight:600">${escapeHtml(r.designation)}</div>
+      <div class="row" style="margin-top:8px">
+        <input type="number" min="1" step="1" id="q_${r.id}" placeholder="Qté" style="width:100px">
+        <select id="u_${r.id}">
+          <option>colis</option>
+          <option>kilo</option>
+          <option>pièce</option>
+        </select>
+        <button class="btn" onclick='add("${r.id}")'>Ajouter</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+/* ---------------------- PANIER ---------------------- */
+function add(id){
+  const q = Number(document.getElementById("q_"+id).value);
+  const u = document.getElementById("u_"+id).value;
+  if(!q || q<=0) return;
+  const r = allRows.find(x=>x.id===id);
+  if(!r) return;
+  // fusion si même produit & même unité
+  const k = cart.findIndex(it => it.id===r.id && it.unite===u);
+  if(k>=0){ cart[k].quantite += q; }
+  else { cart.push({ id:r.id, designation:r.designation, unite:u, quantite:q }); }
+  saveCart();
+  drawCart();
+}
+
+function removeItem(i){
+  cart.splice(i,1);
+  saveCart();
+  drawCart();
+}
+function clearCart(){
+  cart = [];
+  saveCart();
+  drawCart();
+}
+
+function drawCart(){
+  const c = document.getElementById("cart");
+  const count = document.getElementById("cartCount");
+  if(!c) return;
+  if(!cart.length){
+    c.innerHTML = `<div class="msg">Panier vide</div>`;
+    count.textContent = "0 article";
+    return;
+  }
+  count.textContent = `${cart.length} article${cart.length>1?"s":""}`;
+  c.innerHTML = cart.map((it, i)=>`
+    <div class="line">
+      <div class="title">
+        ${escapeHtml(it.designation)}
+        <small>— ${it.quantite} ${escapeHtml(it.unite)}</small>
+      </div>
+      <div class="row">
+        <input type="number" min="1" step="1" value="${it.quantite}" style="width:90px"
+               onchange="updateQty(${i}, this.value)">
+        <select onchange="updateUnit(${i}, this.value)">
+          <option ${it.unite==="colis"?"selected":""}>colis</option>
+          <option ${it.unite==="kilo"?"selected":""}>kilo</option>
+          <option ${it.unite==="pièce"?"selected":""}>pièce</option>
+        </select>
+        <button class="btn danger" onclick="removeItem(${i})">Supprimer</button>
+      </div>
+    </div>
+  `).join("");
+}
+function updateQty(i, val){
+  const n = Number(val);
+  if(n>0){ cart[i].quantite = n; saveCart(); }
+}
+function updateUnit(i, val){
+  cart[i].unite = val;
+  saveCart();
+}
+
+/* ---------------------- EXPORTS ---------------------- */
+function exportCSV(){
+  if(!cart.length) return;
+  const header = "designation,quantite,unite\n";
+  const body = cart.map(it => [
+    csvEscape(it.designation),
+    it.quantite,
+    it.unite
+  ].join(",")).join("\n");
+  const blob = new Blob([header+body], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `commande_${todayStr()}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function exportPDF(){
+  if(!cart.length) return;
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:"pt", format:"a4" });
+  const left = 40, top = 50, line = 18;
+  let y = top;
+
+  doc.setFont("helvetica","bold"); doc.setFontSize(14);
+  doc.text(`Commande Fruits & Légumes — ${todayStr()}`, left, y);
+  y += 24;
+  doc.setFont("helvetica","normal"); doc.setFontSize(11);
+  doc.text("Désignation", left, y);
+  doc.text("Qté", 380, y);
+  doc.text("Unité", 430, y);
+  y += 10;
+  doc.setLineWidth(0.5); doc.line(left, y, 540, y);
+  y += 16;
+
+  cart.forEach(it=>{
+    if(y>770){ doc.addPage(); y = top; }
+    // désignation (multiligne simple)
+    const maxWidth = 320;
+    const lines = doc.splitTextToSize(it.designation, maxWidth);
+    lines.forEach((ln, idx)=>{
+      doc.text(ln, left, y + idx*line);
+    });
+    doc.text(String(it.quantite), 380, y);
+    doc.text(it.unite, 430, y);
+    y += Math.max(line, lines.length*line) + 6;
+  });
+
+  doc.save(`commande_${todayStr()}.pdf`);
+}
+
+function sendEmail(){
+  if(!cart.length) return;
+  const to = document.getElementById("supplierEmail").value.trim();
+  saveEmail();
+  const subject = encodeURIComponent(`Commande Fruits & Légumes — ${todayStr()}`);
+  const bodyLines = cart.map(it => `${it.designation} ; ${it.quantite} ; ${it.unite}`);
+  const body = encodeURIComponent(bodyLines.join("\n"));
+  const href = `mailto:${encodeURIComponent(to)}?subject=${subject}&body=${body}`;
+  window.location.href = href;
+}
+
+/* ---------------------- UTILS ---------------------- */
+function todayStr(){
+  const d = new Date();
+  const pad = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+function csvEscape(s){
+  const needsQuote = /[",\n;]/.test(s);
+  const t = s.replace(/"/g,'""');
+  return needsQuote ? `"${t}"` : t;
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"]/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+}
+
+/* ---------------------- BOOT ---------------------- */
+(function boot(){
+  // recharge catalogue & panier & email si dispo
+  loadCart();
+  loadEmail();
+  if(loadCatalog()){
+    updateFamilies();
+    applyFilter();
+    const name = localStorage.getItem(LS_FILE);
+    if(name) showMsg(`Catalogue chargé depuis "${name}".`);
+    setTimeout(hideMsg, 2200);
+  } else {
+    drawGrid();
+  }
+})();
+</script>
+</body>
+</html>
